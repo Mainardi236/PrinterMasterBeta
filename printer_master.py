@@ -3,10 +3,13 @@ import win32api
 import win32print
 import win32service
 import win32serviceutil
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 import os
+import re
 import shutil
 import subprocess
+
+NFE_NUMBER_PATTERN = re.compile(r"(?<!\d)\d{20}55\d{3}(\d{9})\d{10}(?!\d)")
 
 def restart():
     service_name = "Spooler"
@@ -105,6 +108,160 @@ def open_control_printers():
         info_label.configure(text=f"Erro ao abrir Control Printers: {error}")
 
 
+def extract_nfe_number(filename):
+    match = NFE_NUMBER_PATTERN.search(filename)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def show_nfe_print_selection(folder, pdf_files):
+    nfe_files = []
+    for pdf_file in pdf_files:
+        nfe_number = extract_nfe_number(os.path.basename(pdf_file))
+        if nfe_number is not None:
+            nfe_files.append((nfe_number, pdf_file))
+
+    if not nfe_files:
+        info_label.configure(text=f"Nenhuma NF-e encontrada nos PDFs de:\n{folder}")
+        return []
+
+    nfe_files.sort(key=lambda item: item[0])
+    min_nfe = nfe_files[0][0]
+    max_nfe = nfe_files[-1][0]
+    selected_files = None
+
+    dialog = ctk.CTkToplevel(app)
+    dialog.title("Seleção de NF-es para impressão")
+    dialog.geometry("420x360")
+    dialog.resizable(False, False)
+    dialog.transient(app)
+    dialog.grab_set()
+
+    mode_var = ctk.StringVar(value="all")
+    start_var = ctk.StringVar(value=str(min_nfe))
+    end_var = ctk.StringVar(value=str(max_nfe))
+
+    container = ctk.CTkFrame(dialog)
+    container.pack(padx=20, pady=20, fill="both", expand=True)
+
+    title_label = ctk.CTkLabel(
+        container,
+        text="Informações da pasta",
+        font=ctk.CTkFont(size=16, weight="bold")
+    )
+    title_label.pack(anchor="w", pady=(0, 10))
+
+    folder_info_label = ctk.CTkLabel(
+        container,
+        text=(
+            f"Arquivos encontrados: {len(nfe_files)}\n\n"
+            f"Menor NF-e encontrada: {min_nfe}\n"
+            f"Maior NF-e encontrada: {max_nfe}"
+        ),
+        justify="left"
+    )
+    folder_info_label.pack(anchor="w", fill="x", pady=(0, 14))
+
+    all_radio = ctk.CTkRadioButton(
+        container,
+        text="Imprimir todas as NF-es",
+        variable=mode_var,
+        value="all"
+    )
+    all_radio.pack(anchor="w", pady=(0, 8))
+
+    range_radio = ctk.CTkRadioButton(
+        container,
+        text="Imprimir intervalo específico",
+        variable=mode_var,
+        value="range"
+    )
+    range_radio.pack(anchor="w", pady=(0, 12))
+
+    range_frame = ctk.CTkFrame(container, fg_color="transparent")
+    range_frame.pack(fill="x", pady=(0, 16))
+    range_frame.grid_columnconfigure(1, weight=1)
+
+    start_label = ctk.CTkLabel(range_frame, text="NF-e inicial:")
+    start_label.grid(row=0, column=0, sticky="w", padx=(0, 10), pady=(0, 8))
+    start_entry = ctk.CTkEntry(range_frame, textvariable=start_var)
+    start_entry.grid(row=0, column=1, sticky="ew", pady=(0, 8))
+
+    end_label = ctk.CTkLabel(range_frame, text="NF-e final:")
+    end_label.grid(row=1, column=0, sticky="w", padx=(0, 10))
+    end_entry = ctk.CTkEntry(range_frame, textvariable=end_var)
+    end_entry.grid(row=1, column=1, sticky="ew")
+
+    def update_range_state(*_):
+        state = "normal" if mode_var.get() == "range" else "disabled"
+        start_entry.configure(state=state)
+        end_entry.configure(state=state)
+
+    def confirm_print():
+        nonlocal selected_files
+        if mode_var.get() == "all":
+            selected_files = [pdf_file for _, pdf_file in nfe_files]
+            dialog.destroy()
+            return
+
+        try:
+            start_nfe = int(start_var.get().strip())
+            end_nfe = int(end_var.get().strip())
+        except ValueError:
+            messagebox.showerror(
+                "Intervalo inválido",
+                "Informe apenas números nos campos de NF-e.",
+                parent=dialog
+            )
+            return
+
+        if start_nfe > end_nfe:
+            messagebox.showerror(
+                "Intervalo inválido",
+                "A NF-e inicial deve ser menor ou igual a NF-e final.",
+                parent=dialog
+            )
+            return
+
+        selected_files = [
+            pdf_file
+            for nfe_number, pdf_file in nfe_files
+            if start_nfe <= nfe_number <= end_nfe
+        ]
+        if not selected_files:
+            messagebox.showerror(
+                "Nenhuma NF-e encontrada",
+                "Não existem PDFs no intervalo informado.",
+                parent=dialog
+            )
+            return
+
+        dialog.destroy()
+
+    def cancel_print():
+        dialog.destroy()
+
+    mode_var.trace_add("write", update_range_state)
+    update_range_state()
+
+    buttons_frame = ctk.CTkFrame(container, fg_color="transparent")
+    buttons_frame.pack(fill="x")
+    buttons_frame.grid_columnconfigure((0, 1), weight=1)
+
+    print_button = ctk.CTkButton(buttons_frame, text="Imprimir", command=confirm_print)
+    print_button.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+    cancel_button = ctk.CTkButton(buttons_frame, text="Cancelar", command=cancel_print)
+    cancel_button.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+    dialog.protocol("WM_DELETE_WINDOW", cancel_print)
+    dialog.focus()
+    app.wait_window(dialog)
+
+    return selected_files
+
+
 def print_folder_files():
     global selected_folder
     folder = selected_folder or filedialog.askdirectory()
@@ -120,10 +277,16 @@ def print_folder_files():
         info_label.configure(text=f"Nenhum PDF encontrado em:\n{folder}")
         return
 
+    files_to_print = show_nfe_print_selection(folder, pdf_files)
+    if not files_to_print:
+        return
+
     try:
-        for pdf_file in pdf_files:
+        for pdf_file in files_to_print:
             win32api.ShellExecute(0, "print", os.path.abspath(pdf_file), "", ".", 0)
-        info_label.configure(text=f"Enviados para impressão todos os PDFs de:\n{folder}")
+        info_label.configure(
+            text=f"Enviados para impressão {len(files_to_print)} PDF(s) de:\n{folder}"
+        )
     except Exception as error:
         info_label.configure(text=f"Erro ao imprimir arquivos da pasta: {error}")
 
